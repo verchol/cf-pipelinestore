@@ -1,0 +1,23 @@
+version: '1.0'
+steps:
+ 
+  before_and_after:
+    image: alpine/git
+    commands :
+      - git clone https://${{GIT_TOKEN}}@github.com/${{REPO_OWNER}}/${{REPO_NAME}}.git
+      - mv submit.json > submit.new.json
+      - ls .
+
+  find_new_plugins:
+    image: verchol/cfplugin
+    working_directory: ${{main_clone}}
+    description: collectplugins...
+    commands:
+      # Need to have the source in the correct GOPATH folder - let's do that
+      - mkdir -p /go/src/github.com/${{CF_REPO_OWNER}}
+      - ln -s /codefresh/volume/${{CF_REPO_NAME}} /go/src/github.com/${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+      # Install pre-requisites and execute tests
+      - cd /go/src/github.com/${{CF_REPO_OWNER}}/${{CF_REPO_NAME}} && go get
+      - cd /go/src/github.com/${{CF_REPO_OWNER}}/${{CF_REPO_NAME}} && go test
+
+  
