@@ -5,7 +5,7 @@ steps:
     image: alpine/git
     working_directory: /codefresh/volume
     commands :
-      - if [ ! -d "$DIRECTORY" ]; then
+      - if [ ! -d "/codefresh/volume/$REPO_NAME" ]; then
           git clone https://${{GIT_TOKEN}}@github.com/${{REPO_OWNER}}/${{REPO_NAME}}.git
         fi
       - cd  /codefresh/volume/$REPO_NAME
