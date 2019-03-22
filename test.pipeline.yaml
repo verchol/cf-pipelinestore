@@ -1,11 +1,15 @@
 version: '1.0'
 steps:
- 
-  plugins_repo_clone:
+  this_repo_clone:
     image: alpine/git
     working_directory: /codefresh/volume
     commands :
       - sh .codefresh/clone.sh
+  plugins_repo_clone:
+    image: alpine/git
+    working_directory: /codefresh/volume
+    commands :
+      - sh .codefresh/submit.sh
 
   find_new_plugins:
     image: verchol/pluginsdetector:latest
