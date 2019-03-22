@@ -1,17 +1,19 @@
 version: '1.0'
 steps:
  
-  before_and_after:
+  git_clone:
     image: alpine/git
+    working_directory: /codefresh/volume
     commands :
       - git clone https://${{GIT_TOKEN}}@github.com/${{REPO_OWNER}}/${{REPO_NAME}}.git
+      - cd  /codefresh/volume/$REPO_NAME
       - mv submit.json > submit.new.json
       - git checkout HEAD~1 submit.json 
       - mv submit.json > submit.old.json
 
   find_new_plugins:
     image: verchol/pluginsdetector:latest
-    working_directory: ${{main_clone}}
+    working_directory: ${{/codefresh/volume/$REPO_NAME}}
     description: collectplugins...
     cmd:
       - --prev Dockerfile --current Dockerfile
