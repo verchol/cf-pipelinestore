@@ -7,7 +7,7 @@ steps:
     commands :
       - git clone https://${{GIT_TOKEN}}@github.com/${{REPO_OWNER}}/${{REPO_NAME}}.git
       - cd  /codefresh/volume/$REPO_NAME
-      - mv submit.json > submit.new.json
+      - mv submit.json submit.new.json
       - git checkout HEAD~1 submit.json 
       - mv submit.json > submit.old.json
 
