@@ -2,6 +2,7 @@ version: '1.0'
 steps:
   this_repo_clone:
     image: alpine/git
+    #test
     working_directory: /codefresh/volume
     commands :
       - sh .codefresh/clone.sh
