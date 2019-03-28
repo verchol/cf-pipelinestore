@@ -1,7 +1,7 @@
 
     echo processing codefresh-io/plugins/submit.json 
-    #export REPO_OWNER=codefresh-io
-    #export REPO_NAME=plugins
+    export REPO_OWNER=codefresh-io
+    export REPO_NAME=plugins
  
     if [ ! -d "$PWD/$REPO_NAME" ]; then
            echo cloning ...
