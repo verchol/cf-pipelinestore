@@ -11,5 +11,5 @@
     echo $PWD 
     ls .
     mv submit.json submit.new.json
-    git checkout HEAD~1 submit.json 
+    git checkout HEAD~2 submit.json 
     mv submit.json submit.old.json
