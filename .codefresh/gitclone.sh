@@ -6,5 +6,7 @@ fi
 
 cd ./$REPO_NAME
 git checkout $REPO_BRANCH 
+echo branch is $REP_BRANCH
+cat ./submit.json
 cd ..
 
