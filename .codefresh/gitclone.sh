@@ -6,4 +6,5 @@ fi
 
 cd ./$REPO_NAME
 git checkout $REPO_BRANCH 
+cd ..
 
