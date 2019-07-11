@@ -1,0 +1,23 @@
+version: 1
+steps:
+    go_setup :
+        image : alpine
+        working_directory:  /codefresh/volume/
+        commands: 
+          - mkdir -p /codefresh/volume/go/gopath/src/
+          - mkdir -p /codefresh/volume/go/gocache
+          - export GOPATH=/codefresh/volume/go/gopath
+          - cf_export GOPATH=$GOPATH
+          - cf_export GOCACHE= /codefresh/volume/go/gocache
+          
+    main_clone:
+        title: 'Cloning main repository...'
+        image : alpine/git
+        working_directory:  ${{GOPATH}}/src
+        #/codefresh/volume/src/helm.sh
+        commands:
+          - export REPO=https://github.com/verchol/cf-pipelinestore.git
+          - if ! test -d ${{GOPATH}}/src/helm.sh/helm;then git clone  $REPO; cd ./cf-pipelinestore; git checkout master; fi
+          - cf_export HELM_REPO=${{GOPATH}}/src/cf-pipelinestore
+          - ls.
+         
