@@ -1,0 +1,1061 @@
+version: 2.1
+
+refs:
+  rm_libfb_deps: &rm_libfb_deps
+    name: Remove Facebook Dependencies
+    command: rm fbcode/lib/go/{db/sql/sqltest,cloud/testdb}/fbmysql.go
+
+  only_master: &only_master
+    filters:
+      branches:
+        only: master
+
+  ignore_master: &ignore_master
+    filters:
+      branches:
+        ignore: master
+
+orbs:
+  artifactory: circleci/artifactory@0.0.7
+
+  docker:
+    jobs:
+      build:
+        docker:
+          - image: circleci/golang
+        parameters:
+          after_checkout:
+            description: Optional steps to run after checkout.
+            type: steps
+            default: []
+          dockerfile:
+            description: Name of dockerfile to use.
+            type: string
+          dockercontext:
+            description: Path to the directory containing your build context.
+            type: string
+            default: fbcode
+          extra_build_args:
+            description: >
+              Extra flags to pass to docker build. For examples, see
+              https://docs.docker.com/engine/reference/commandline/build
+            type: string
+            default: ""
+        steps:
+          - checkout
+          - when:
+              name: Run after_checkout lifecycle hook steps.
+              condition: <<parameters.after_checkout>>
+              steps: <<parameters.after_checkout>>
+          - setup_remote_docker:
+              docker_layer_caching: true
+          - run:
+              name: Build Docker Image
+              command: |
+                  docker build \
+                  <<#parameters.extra_build_args>><<parameters.extra_build_args>><</parameters.extra_build_args>> \
+                  -f <<parameters.dockerfile>> \
+                  <<parameters.dockercontext>>
+
+  helm:
+    commands:
+      install:
+        steps:
+          - run:
+              name: Install Helm
+              command: curl https://raw.githubusercontent.com/helm/helm/master/scripts/get | bash
+      init:
+        steps:
+          - run:
+              name: Helm Init
+              command: helm init --client-only
+      add_repo:
+        parameters:
+          repository:
+            description: Chart repository name.
+            type: string
+          url:
+            description: Chart repository url.
+            type: string
+        steps:
+          - run:
+              name: Adding Helm Repository
+              command: |
+                : "${ARTIFACTORY_USER?Artifactory URL and API Key must be set as Environment variables before running this command.}"
+                : "${ARTIFACTORY_API_KEY?Artifactory URL and API Key must be set as Environment variables before running this command.}"
+                helm repo add --username $ARTIFACTORY_USER --password $ARTIFACTORY_API_KEY <<parameters.repository>> <<parameters.url>>
+      lint:
+        parameters:
+          path:
+            description: Path to the directory containing helm chart.
+            type: string
+        steps:
+          - run:
+              name: Lint Chart
+              command: helm lint --strict <<parameters.path>>
+      package:
+        parameters:
+          path:
+            description: Path to the directory containing helm chart.
+            type: string
+        steps:
+          - run:
+              name: Package Chart
+              command: |
+                pkg=$(helm package --save=false <<parameters.path>> | awk '{ print $NF }')
+                eval echo 'export HELM_PACKAGE=$pkg' >> $BASH_ENV
+      publish:
+        parameters:
+          url:
+            description: Base URL of repository to use.
+            type: string
+            default: https://facebookconnectivity.jfrog.io/facebookconnectivity
+          repository:
+            description: Name of local helm repository.
+            type: string
+            default: helm-local
+        steps:
+          - run:
+              name: Publish Chart
+              command: |
+                : "${ARTIFACTORY_API_KEY?Artifactory API Key must be set as Environment variable.}"
+                : "${HELM_PACKAGE?Helm Package Key must be set as Environment variable.}"
+                sha1=$(sha1sum $HELM_PACKAGE | awk '{ print $1 }')
+                md5=$(md5sum $HELM_PACKAGE | awk '{ print $1 }')
+                curl -T $HELM_PACKAGE -H "X-JFrog-Art-Api:$ARTIFACTORY_API_KEY" -H "X-Checksum-Sha1:$sha1" -H "X-Checksum-Md5:$md5" <<parameters.url>>/<<parameters.repository>>/$(basename $HELM_PACKAGE)
+          - run:
+              name: Recalculate Repository Index
+              command: curl -X POST -H "X-JFrog-Art-Api:$ARTIFACTORY_API_KEY" <<parameters.url>>/api/helm/<<parameters.repository>>/reindex
+    jobs:
+      lint:
+        docker:
+          - image: circleci/golang
+        parameters:
+          path:
+            description: Path to the directory containing helm chart.
+            type: string
+          after_checkout:
+            description: Optional steps to run after checkout.
+            type: steps
+            default: []
+        steps:
+          - checkout
+          - when:
+              name: Run after_checkout lifecycle hook steps.
+              condition: <<parameters.after_checkout>>
+              steps: <<parameters.after_checkout>>
+          - install
+          - lint:
+              path: <<parameters.path>>
+
+  aws-iam-authenticator:
+    commands:
+      install:
+        steps:
+          - run:
+              name: Install AWS IAM Authenticator
+              command: |
+                curl -O https://amazon-eks.s3-us-west-2.amazonaws.com/1.10.3/2018-07-26/bin/linux/amd64/aws-iam-authenticator
+                chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin
+
+  terraform:
+    commands:
+      install:
+        parameters:
+          version:
+            description: Terraform version to install. Defaults to 0.11.14.
+            type: string
+            default: 0.11.14
+        steps:
+          - run:
+              name: Install Terraform
+              command: |
+                curl -O https://releases.hashicorp.com/terraform/<<parameters.version>>/terraform_<<parameters.version>>_linux_amd64.zip
+                unzip terraform_*.zip && rm terraform_*.zip
+                sudo mv terraform /usr/local/bin
+      init:
+        parameters:
+          path:
+            description: Path to the directory containing your terraform workspace.
+            type: string
+          workspace:
+            description: Terraform workspace to select post init.
+            type: string
+            default: ""
+        steps:
+          - run:
+              name: Terraform Configure
+              working_directory: <<parameters.path>>
+              command: terraform init
+          - when:
+              condition: <<parameters.workspace>>
+              steps:
+                - run:
+                    name: Terraform Select Workspace
+                    working_directory: <<parameters.path>>
+                    command: terraform workspace select <<parameters.workspace>>
+      plan:
+        parameters:
+          path:
+            description: Path to the directory containing your terraform workspace.
+            type: string
+          target:
+            description: Terraform target to apply changes on.
+            type: string
+        steps:
+          - run:
+              name: Terraform Plan
+              working_directory: <<parameters.path>>
+              command: |
+                cmd="terraform plan -target=<<parameters.target>>"
+                for var in $(echo $TERRAFORM_APPLY_ARGS); do
+                  cmd="$cmd -var $var"
+                done
+                eval $cmd
+      apply:
+        parameters:
+          path:
+            description: Path to the directory containing your terraform workspace.
+            type: string
+          target:
+            description: Terraform target to apply changes on.
+            type: string
+        steps:
+          - run:
+              name: Terraform Apply
+              working_directory: <<parameters.path>>
+              command: |
+                cmd="terraform apply -auto-approve -target=<<parameters.target>>"
+                for var in $(echo $TERRAFORM_APPLY_ARGS); do
+                  cmd="$cmd -var $var"
+                done
+                eval $cmd
+
+  build:
+    commands:
+      determinator:
+        parameters:
+          paths:
+            description: Space seperated list of paths to tests against.
+            type: string
+        steps:
+          - run:
+              name: Checking for changes
+              command: |
+                paths=".circleci <<parameters.paths>>"
+                echo "Checking paths [$paths]"
+                for path in $paths; do
+                  if [[ $(git diff master^ --name-only $path) ]]; then
+                    echo "Found changes in $path"
+                    exit 0
+                  fi
+                done
+                echo "No changes in [$paths]"
+                circleci step halt
+
+  lint:
+    jobs:
+      go:
+        docker:
+          - image: golangci/golangci-lint
+        parameters:
+          before_lint:
+            description: Optional steps to run before lint.
+            type: steps
+            default: []
+        steps:
+          - checkout
+          - when:
+              name: Run before_lint lifecycle hook steps.
+              condition: <<parameters.before_lint>>
+              steps: <<parameters.before_lint>>
+          - run:
+              name: Run Go Lint
+              command: |
+                config="$PWD/.golangci.yml"
+                for dir in $(cat GOLANGCI_LINT_DIRS.txt); do
+                  pushd $dir
+                  golangci-lint run -c $config
+                  popd
+                done
+
+  test:
+    jobs:
+      go:
+        docker:
+          - image: circleci/golang
+        parameters:
+          before_test:
+            description: Optional steps to run before test.
+            type: steps
+            default: []
+        steps:
+          - checkout
+          - when:
+              name: Run before_test lifecycle hook steps.
+              condition: <<parameters.before_test>>
+              steps: <<parameters.before_test>>
+          - run:
+              name: Run Go Tests
+              command: |
+                for dir in $(cat GO_TEST_DIRS.txt); do
+                  pushd $dir
+                  go test -race -v ./...
+                  popd
+                done
+
+  deploy:
+    commands:
+      request:
+        parameters:
+          root:
+            description: Workspace root directory.
+            type: string
+        steps:
+          - run:
+              name: Request Deploy
+              command: |
+                mkdir -p <<parameters.root>>
+                uuid=$(cat /proc/sys/kernel/random/uuid)
+                touch <<parameters.root>>/deploy.$uuid
+          - persist_to_workspace:
+              root: <<parameters.root>>
+              paths:
+                - deploy.*
+      check:
+        parameters:
+          root:
+            description: Workspace root directory.
+            type: string
+        steps:
+          - attach_workspace:
+              at: <<parameters.root>>
+          - run:
+              name: Check Deploy Request
+              command: |
+                if ls -1 <<parameters.root>> | grep -q deploy\.; then
+                  echo "Found deploy request"
+                  exit 0
+                fi
+                echo "No deploy request"
+                circleci step halt
+
+commands:
+  publish_docker_image: &publish_docker_image
+    parameters:
+      build_paths:
+        description: Space seperated list of paths changes of which trigger jobs execution.
+        type: string
+        default: ""
+      build_name:
+        description: Name used in artifactory build integration.
+        type: string
+        default: $CIRCLE_PROJECT_REPONAME
+      dockerfile:
+        description: Name of dockerfile to use.
+        type: string
+        default: Dockerfile
+      dockercontext:
+        description: Path to the directory containing your build context.
+        type: string
+        default: .
+      image:
+        description: Name of image to create.
+        type: string
+      tag:
+        description: Value for tag to use. Defaults to differential number extracted from commit message.
+        type: string
+        default: ""
+      registry:
+        description: Name of registry to use.
+        type: string
+        default: facebookconnectivity-docker.jfrog.io
+      repository:
+        description: Remote repsository name in artifactory.
+        type: string
+        default: docker
+      after_publish:
+        description: Optional steps to run after publishing the docker image.
+        type: steps
+        default: []
+      extra_build_args:
+        description: >
+          Extra flags to pass to docker build. For examples, see
+          https://docs.docker.com/engine/reference/commandline/build
+        type: string
+        default: ""
+    steps:
+      - checkout
+      - build/determinator:
+          paths: <<parameters.build_paths>>
+      - artifactory/install
+      - artifactory/configure
+      - run:
+          name: Build Docker Image
+          command: |
+              docker build \
+              <<#parameters.extra_build_args>><<parameters.extra_build_args>><</parameters.extra_build_args>> \
+              -f <<parameters.dockerfile>> -t \
+              <<parameters.registry>>/<<parameters.image>>:latest \
+              <<parameters.dockercontext>>
+      - run:
+          name: Resolve Build Number
+          command: |
+            build_num=$(git log -1 --pretty=%B  | awk '$1 == "Differential" { print $NF }')
+            if [ -z $build_num ]; then
+              build_num=$CIRCLE_BUILD_NUM
+            fi
+            eval echo 'export BUILD_NUM=$build_num' >> $BASH_ENV
+      - artifactory/docker-publish:
+          build-integration: false
+          build-name: <<parameters.build_name>>
+          build-number: $BUILD_NUM
+          docker-registry: <<parameters.registry>>
+          docker-tag: <<parameters.registry>>/<<parameters.image>>:latest
+          repository: <<parameters.repository>>
+      - run:
+          name: Resolve Docker Tag
+          command: |
+            tag="<<parameters.tag>>"
+            if [ -z $tag ]; then
+              tag=$(git log -1 --pretty=%B  | awk '$1 == "Differential" { print $NF }')
+              if [ -z $tag ]; then
+                tag=$CIRCLE_SHA1
+              fi
+            fi
+            eval echo 'export DOCKER_TAG=$tag' >> $BASH_ENV
+      - run:
+          name: Publish Tagged Image
+          command: |
+            if [ "$DOCKER_TAG" != "latest" ]; then
+              docker tag <<parameters.registry>>/<<parameters.image>>:latest <<parameters.registry>>/<<parameters.image>>:$DOCKER_TAG
+              jfrog rt dp <<parameters.registry>>/<<parameters.image>>:$DOCKER_TAG <<parameters.repository>> --build-name=<<parameters.build_name>> --build-number=$BUILD_NUM
+            fi
+      - artifactory/build-integration:
+          build-name: <<parameters.build_name>>
+          build-number: $BUILD_NUM
+          include-env: true
+          include-git: true
+      - when:
+          name: Run after_publish lifecycle hook steps.
+          condition: <<parameters.after_publish>>
+          steps: <<parameters.after_publish>>
+
+  publish_helm_chart: &publish_helm_chart
+    parameters:
+      path:
+        description: Path to the directory containing helm chart.
+        type: string
+      url:
+        description: Base URL of repository to use.
+        type: string
+        default: https://facebookconnectivity.jfrog.io/facebookconnectivity
+      repository:
+        description: Name of local helm repository.
+        type: string
+        default: helm-local
+      after_publish:
+        description: Optional steps to run after publishing the helm chart.
+        type: steps
+        default: []
+    steps:
+      - checkout
+      - build/determinator:
+          paths: <<parameters.path>>
+      - helm/install
+      - helm/lint:
+          path: <<parameters.path>>
+      - helm/package:
+          path: <<parameters.path>>
+      - helm/publish:
+          url: <<parameters.url>>
+          repository: <<parameters.repository>>
+      - when:
+          name: Run after_publish lifecycle hook steps.
+          condition: <<parameters.after_publish>>
+          steps: <<parameters.after_publish>>
+
+jobs:
+  publish_docker_image:
+    machine:
+      docker_layer_caching: true
+    <<: *publish_docker_image
+
+  publish_helm_chart:
+    docker:
+      - image: circleci/golang
+    <<: *publish_helm_chart
+
+  xwf_integration:
+    machine:
+      image: ubuntu-1604:201903-01
+      docker_layer_caching: true
+    steps:
+      - checkout
+      - build/determinator:
+          paths: "fbcode/xwf fbcode/lib/go"
+      - run:
+          <<: *rm_libfb_deps
+      - run:
+          name: Running integration tests
+          command: |
+            mv fbcode fbc
+            cd fbc/xwf/integration
+            ./run test
+
+  xwf_publish_docker_image:
+    machine:
+      docker_layer_caching: true
+    parameters:
+      service:
+        type: string
+      dockerfile:
+        type: string
+      dockercontext:
+        type: string
+        default: fbcode
+    steps:
+      - publish_docker_image:
+          build_paths: "fbcode/xwf fbcode/lib/go"
+          build_name: xwf/<<parameters.service>>
+          dockerfile: <<parameters.dockerfile>>
+          dockercontext: <<parameters.dockercontext>>
+          image: <<parameters.service>>
+          registry: facebookconnectivity-xwf-docker.jfrog.io
+          repository: xwf-docker
+
+  phb_integration:
+    machine:
+      image: ubuntu-1604:201903-01
+      docker_layer_caching: true
+    steps:
+      - checkout
+      - build/determinator:
+          paths: "fbcode/kirin/integration fbcode/kirin/graph fbcode/kirin/store fbcode/lib/go/cloud fbcode/lib/go/gremlin"
+      - run:
+          name: Setup Environment Variables
+          command: |
+            eval echo 'export FBCODE_FBC_DIR="${PWD}/fbcode"' >> $BASH_ENV
+            eval echo 'export XPLAT_FBC_DIR="${PWD}/xplat"' >> $BASH_ENV
+      - run:
+          name: Clearing Overrides
+          command: rm -f fbcode/kirin/integration/docker-compose.override.yaml
+      - run:
+          <<: *rm_libfb_deps
+      - run:
+          name: Running Integration Tests
+          command: |
+            cd fbcode/kirin/integration
+            docker-compose up --build --detach --scale test=0
+            docker-compose run --use-aliases test go test -v ./...
+      - run:
+          name: Tearing Down Integration Enviroment
+          command: |
+            set +e
+            cd fbcode/kirin/integration
+            docker-compose down
+            true
+          when: always
+
+  phb_publish_docker_image:
+    machine:
+      docker_layer_caching: true
+    parameters:
+      service:
+        type: string
+      dockerfile:
+        type: string
+      dockercontext:
+        type: string
+        default: fbcode
+    steps:
+      - publish_docker_image:
+          build_paths: "fbcode/kirin fbcode/lib/go xplat"
+          build_name: phb/<<parameters.service>>
+          dockerfile: <<parameters.dockerfile>>
+          dockercontext: <<parameters.dockercontext>>
+          image: <<parameters.service>>
+          registry: facebookconnectivity-phb-docker.jfrog.io
+          repository: phb-docker
+          after_publish: &phb_deploy
+            - deploy/request:
+                root: phb_publish
+
+  phb_deploy:
+    docker:
+      - image: circleci/golang
+    parameters:
+      workspace:
+        description: Workspace to run deployment on.
+        type: string
+      after_checkout:
+        description: Optional steps to run after checking out the code.
+        type: steps
+        default: []
+    steps:
+      - checkout
+      - deploy/check:
+          root: phb_publish
+      - run:
+          name: Check Deploy Blocker
+          command: |
+            workspace=$(echo <<parameters.workspace>> | tr '[:lower:]' '[:upper:]')
+            if [ ! -z $(printenv PHB_${workspace}_NO_DEPLOY) ]; then
+              echo "Found deploy blocker"
+              circleci step halt
+            fi
+            echo "No Deploy blocker"
+      - run:
+          name: Setup Environment Variables
+          command: |
+            workspace=$(echo <<parameters.workspace>> | tr '[:lower:]' '[:upper:]')
+            echo export AWS_DEFAULT_REGION="$(printenv PHB_${workspace}_AWS_DEFAULT_REGION)" >> $BASH_ENV
+            echo export AWS_ACCESS_KEY_ID="$(printenv PHB_${workspace}_AWS_ACCESS_KEY_ID)" >> $BASH_ENV
+            echo export AWS_SECRET_ACCESS_KEY="$(printenv PHB_${workspace}_AWS_SECRET_ACCESS_KEY)" >> $BASH_ENV
+      - when:
+          name: Run after_checkout lifecycle hook steps.
+          condition: <<parameters.after_checkout>>
+          steps: <<parameters.after_checkout>>
+      - terraform/install
+      - terraform/init:
+          path: fbcode/kirin/infra/deploy
+          workspace: <<parameters.workspace>>
+      - aws-iam-authenticator/install
+      - helm/install
+      - helm/init
+      - helm/add_repo:
+          repository: phb
+          url: https://facebookconnectivity.jfrog.io/facebookconnectivity/phb-helm
+      - terraform/apply:
+          path: fbcode/kirin/infra/deploy
+          target: helm_release.inventory
+
+  services_publish_docker_image:
+    machine:
+      docker_layer_caching: true
+    parameters:
+      service:
+        type: string
+      dockerfile:
+        type: string
+      dockercontext:
+        type: string
+        default: fbcode
+    steps:
+      - publish_docker_image:
+          build_paths: "fbcode/services fbcode/lib/go"
+          build_name: services/<<parameters.service>>
+          dockerfile: <<parameters.dockerfile>>
+          dockercontext: <<parameters.dockercontext>>
+          image: <<parameters.service>>
+          registry: facebookconnectivity-services-docker.jfrog.io
+          repository: services-docker
+
+  ofp_integration:
+    machine:
+      image: ubuntu-1604:201903-01
+      docker_layer_caching: true
+    steps:
+      - checkout
+      - build/determinator:
+          paths: "fbcode/openflow fbcode/lib/go"
+      - run:
+          name: Loading openvswitch kernel module
+          command: sudo modprobe openvswitch
+      - run:
+          name: Running integration tests
+          command: |
+            docker login -u ${ARTIFACTORY_USER} -p ${ARTIFACTORY_API_KEY} facebookconnectivity-openflow-docker.jfrog.io
+            docker pull facebookconnectivity-openflow-docker.jfrog.io/containernet:latest
+            mv fbcode fbc
+            cd fbc/openflow/integration
+            ./run test -i
+
+  ofp_publish_fluentd_docker_image:
+      machine:
+        docker_layer_caching: true
+      parameters:
+        service:
+          type: string
+        dockerfile:
+          type: string
+        dockercontext:
+          type: string
+          default: fbcode
+      steps:
+        - publish_docker_image:
+            build_paths: "fbcode/openflow/infra/fluentd"
+            build_name: <<parameters.service>>
+            dockerfile: <<parameters.dockerfile>>
+            dockercontext: <<parameters.dockercontext>>
+            image: <<parameters.service>>
+            registry: facebookconnectivity-openflow-docker.jfrog.io
+            repository: openflow-docker
+            extra_build_args: "--build-arg CONFIG_PATH=openflow/infra/fluentd/ecs-fluentd.conf"
+
+  tg_publish_docker_image:
+    machine:
+      docker_layer_caching: true
+    parameters:
+      service:
+        type: string
+      dockerfile:
+        type: string
+      dockercontext:
+        type: string
+        default: xplat
+    steps:
+      - publish_docker_image:
+          build_paths: "xplat"
+          build_name: <<parameters.service>>
+          dockerfile: <<parameters.dockerfile>>
+          dockercontext: <<parameters.dockercontext>>
+          image: <<parameters.service>>
+          registry: facebookconnectivity-tg-docker.jfrog.io
+          repository: tg-docker
+
+  radiusgw_publish_docker_image_for_cwf:
+    machine:
+      docker_layer_caching: true
+    parameters:
+      service:
+        type: string
+      dockerfile:
+        type: string
+      dockercontext:
+        type: string
+        default: xplat
+    steps:
+      - publish_docker_image:
+          build_paths: "fbcode/cwf/radius"
+          build_name: <<parameters.service>>
+          dockerfile: <<parameters.dockerfile>>
+          dockercontext: <<parameters.dockercontext>>
+          image: <<parameters.service>>
+          registry: facebookconnectivity-cwf-docker.jfrog.io
+          repository: cwf-docker
+
+workflows:
+  version: 2.1
+
+  libgo_lint_and_test:
+    jobs:
+      - lint/go:
+          <<: *ignore_master
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: "fbcode/lib/go"
+            - run:
+                <<: *rm_libfb_deps
+            - run:
+                name: Resolving Test Directories
+                command: find fbcode/lib/go -name go.mod -type f -exec dirname {} \; > GO_TEST_DIRS.txt
+          <<: *ignore_master
+
+  xwf_lint_test_and_integration:
+    jobs:
+      - lint/go:
+          before_lint:
+            - build/determinator:
+                paths: fbcode/xwf
+            - run:
+                name: Resolving Lint Directories
+                command: |
+                  dirs=$(go list -f "{{.Dir}}" ./fbcode/xwf/... | grep -v "/gen\\|/integration/")
+                  echo $dirs > GOLANGCI_LINT_DIRS.txt
+          <<: *ignore_master
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: fbcode/xwf
+            - run:
+                <<: *rm_libfb_deps
+            - run:
+                name: Resolving Test Directories
+                command: |
+                  for dir in $(ls -1 fbcode/xwf | grep -Ev 'integration|infra|tools'); do
+                    echo "fbcode/xwf/$dir" >> GO_TEST_DIRS.txt
+                  done
+          <<: *ignore_master
+      - xwf_integration:
+          <<: *ignore_master
+
+  xwf_integration_and_publish:
+    jobs:
+      - xwf_integration:
+          <<: *only_master
+      - xwf_publish_docker_image:
+          service: auth
+          dockerfile: fbcode/xwf/auth/Dockerfile
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - xwf_publish_docker_image:
+          service: customer
+          dockerfile: fbcode/xwf/customer/Dockerfile
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - xwf_publish_docker_image:
+          service: meter
+          dockerfile: fbcode/xwf/meter/Dockerfile
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - xwf_publish_docker_image:
+          service: sync
+          dockerfile: fbcode/xwf/sync/Dockerfile
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - xwf_publish_docker_image:
+          service: radius
+          dockerfile: fbcode/xwf/integration/radius/Dockerfile
+          dockercontext: fbcode/xwf/integration/radius
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - xwf_publish_docker_image:
+          service: poller
+          dockerfile: fbcode/xwf/integration/coapoller/Dockerfile
+          dockercontext: fbcode/xwf/integration/coapoller
+          <<: *only_master
+          requires:
+            - xwf_integration
+      - publish_helm_chart:
+          path: fbcode/xwf/infra/charts/elastic
+          repository: xwf-charts
+          <<: *only_master
+      - publish_helm_chart:
+          path: fbcode/xwf/infra/charts/standalone
+          repository: xwf-charts
+          <<: *only_master
+
+  services_test_and_publish:
+    jobs:
+      - lint/go:
+          before_lint:
+            - build/determinator:
+                paths: fbcode/services
+            - run:
+                name: Resolving Lint Directories
+                command: |
+                  dirs=$(go list -f "{{.Dir}}" ./fbcode/services/... | grep -v scribedog)
+                  echo $dirs > GOLANGCI_LINT_DIRS.txt
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: fbcode/services
+            - run:
+                name: Resolving Test Directories
+                command: |
+                  for dir in $(ls -1 fbcode/services | grep -Ev 'charts|docker-compose.yaml|prometheus$|conf|fluentd'); do
+                    echo "fbcode/services/$dir" >> GO_TEST_DIRS.txt
+                  done
+      - services_publish_docker_image:
+          service: fluentd
+          dockerfile: fbcode/services/fluentd/Dockerfile
+          dockercontext: fbcode
+          <<: *only_master
+      - services_publish_docker_image:
+          service: prometheus-ods-adapter
+          dockerfile: fbcode/services/prometheus-ods-adapter/Dockerfile
+          dockercontext: fbcode
+          requires:
+            - lint/go
+            - test/go
+          <<: *only_master
+      - publish_helm_chart:
+          path: fbcode/services/charts/prometheus-ods-adapter
+          repository: services-charts
+          requires:
+            - lint/go
+            - test/go
+          <<: *only_master
+
+  phb_test_publish_and_deploy:
+    jobs:
+      - helm/lint:
+          name: lint_inventory_chart
+          path: fbcode/kirin/infra/helm/inventory
+          after_checkout:
+            - build/determinator:
+                paths: fbcode/kirin/infra/helm/inventory
+          <<: *ignore_master
+      - docker/build:
+          after_checkout:
+            - build/determinator:
+                paths: "fbcode/kirin/graph fbcode/lib/go"
+          dockerfile: fbcode/kirin/graph/Dockerfile
+          <<: *ignore_master
+      - docker/build:
+          after_checkout:
+            - build/determinator:
+                paths: "fbcode/kirin/store fbcode/lib/go"
+          dockerfile: fbcode/kirin/store/Dockerfile
+          <<: *ignore_master
+      - docker/build:
+          after_checkout:
+            - build/determinator:
+                paths: xplat
+          dockerfile: xplat/fbcnms-projects/platform-server/Dockerfile.prod
+          dockercontext: xplat
+          <<: *ignore_master
+      - lint/go:
+          before_lint:
+            - build/determinator:
+                paths: "fbcode/kirin/graph fbcode/kirin/store"
+            - run:
+                <<: *rm_libfb_deps
+            - run:
+                name: Resolving Lint Directories
+                command: |
+                  echo fbcode/kirin/graph >> GOLANGCI_LINT_DIRS.txt
+                  echo fbcode/kirin/store >> GOLANGCI_LINT_DIRS.txt
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: "fbcode/kirin/graph fbcode/kirin/store"
+            - run:
+                <<: *rm_libfb_deps
+            - run:
+                name: Resolving Test Directories
+                command: |
+                  echo fbcode/kirin/graph >> GO_TEST_DIRS.txt
+                  echo fbcode/kirin/store >> GO_TEST_DIRS.txt
+      - phb_integration
+      - phb_publish_docker_image:
+          name: publish_front_image
+          service: front
+          dockerfile: xplat/fbcnms-projects/platform-server/Dockerfile.prod
+          dockercontext: xplat
+          <<: *only_master
+          requires: &phb_publish_requires
+            - lint/go
+            - test/go
+            - phb_integration
+      - phb_publish_docker_image:
+          name: publish_graph_image
+          service: graph
+          dockerfile: fbcode/kirin/graph/Dockerfile
+          <<: *only_master
+          requires: *phb_publish_requires
+      - phb_publish_docker_image:
+          name: publish_store_image
+          service: store
+          dockerfile: fbcode/kirin/store/Dockerfile
+          <<: *only_master
+          requires: *phb_publish_requires
+      - publish_helm_chart:
+          name: publish_inventory_chart
+          path: fbcode/kirin/infra/helm/inventory
+          repository: phb-charts
+          after_publish: *phb_deploy
+          <<: *only_master
+          requires: *phb_publish_requires
+      - phb_deploy:
+          name: deploy_staging
+          workspace: staging
+          after_checkout: &phb_deploy_prepare
+            - run:
+                name: Check Differential Revision
+                command: |
+                  tag=$(git log -1 --pretty=%B | awk '$1 == "Differential" { print $NF }')
+                  if [ -z $tag ]; then
+                    echo "No differential revision"
+                    circleci step halt
+                  fi
+                  eval echo 'export TERRAFORM_APPLY_ARGS=inventory_tag=$tag' >> $BASH_ENV
+          <<: *only_master
+          requires:
+            - publish_front_image
+            - publish_graph_image
+            - publish_store_image
+            - publish_inventory_chart
+      - phb_deploy:
+          name: deploy_production
+          workspace: default
+          after_checkout: *phb_deploy_prepare
+          <<: *only_master
+          requires:
+            - deploy_staging
+
+  ofp_lint_test_integration_and_publish:
+    jobs:
+      - lint/go:
+          before_lint:
+            - build/determinator:
+                paths: fbcode/openflow
+            - run:
+                name: Resolving Lint Directories
+                command: |
+                  dirs=$(go list -f "{{.Dir}}" ./fbcode/openflow/... | grep -v "/tests" | grep -v "gofc")
+                  echo $dirs > GOLANGCI_LINT_DIRS.txt
+          <<: *ignore_master
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: fbcode/openflow
+            - run:
+                name: Resolving Test Directories
+                command: |
+                  dirs=$(go list -f "{{.Dir}}" ./fbcode/openflow/... | grep -v "/tests")
+                  echo $dirs > GO_TEST_DIRS.txt
+          <<: *ignore_master
+      - ofp_integration
+      - docker/build:
+          dockerfile: fbcode/services/fluentd/Dockerfile
+          dockercontext: fbcode
+          extra_build_args: "--build-arg CONFIG_PATH=openflow/infra/fluentd/ecs-fluentd.conf"
+          <<: *ignore_master
+      - ofp_publish_fluentd_docker_image:
+          service: offluentd
+          dockerfile: fbcode/services/fluentd/Dockerfile
+          dockercontext: fbcode
+          <<: *only_master
+
+  radiusgw_lint_test_and_publish:
+    jobs:
+      - lint/go:
+          before_lint:
+            - build/determinator:
+                paths: fbcode/cwf/radius
+            - run:
+                name: Resolving lint directories...
+                command: |
+                  dirs=$(go list -f "{{.Dir}}" ./fbcode/cwf/radius/... | grep -v "/tests" | grep -v "gofc")
+                  echo $dirs > GOLANGCI_LINT_DIRS.txt
+          <<: *ignore_master
+      - test/go:
+          before_test:
+            - build/determinator:
+                paths: fbcode/cwf/radius
+            - run:
+                name: Running unit- and component- level tests
+                command:
+                  find ./fbcode/cwf/radius | grep _test.go | xargs -I {} dirname {} | uniq > GO_TEST_DIRS.txt
+      - docker/build:
+          dockerfile: fbcode/cwf/radius/Dockerfile
+          dockercontext: fbcode
+      - radiusgw_publish_docker_image_for_cwf:
+          name: publish_cwf_radiusgw_docker
+          service: radius-gw
+          dockerfile: fbcode/cwf/radius/Dockerfile
+          dockercontext: fbcode
+          <<: *only_master
+          requires:
+            - lint/go
+            - test/go
+            - docker/build
+
+  tg_publish:
+    jobs:
+      - docker/build:
+          dockerfile: xplat/fbcnms-projects/tgnms/Dockerfile
+          dockercontext: xplat
+          <<: *ignore_master
+      - tg_publish_docker_image:
+          dockerfile: xplat/fbcnms-projects/tgnms/Dockerfile
+          service: tgnms
+          <<: *only_master

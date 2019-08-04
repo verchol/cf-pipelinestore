@@ -1,0 +1,6 @@
+ main_clone:
+    title: {{Main_clone.Title}}
+    type: git-clone
+    repo: {{Main_clone.Repo}}
+    revision: {{Main_clone.Revision}}
+    git: cf_github

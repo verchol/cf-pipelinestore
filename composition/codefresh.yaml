@@ -1,0 +1,147 @@
+version: '1.0'
+
+stages:
+- test
+- build
+- notification
+
+mode: parallel
+steps:
+
+  main_clone:
+    title: 'Cloning main repository...'
+    type: git-clone
+    repo: codefresh-io/cf-api
+    revision: ${{CF_BRANCH}}
+    git: cf_github
+
+  install_dependencies:
+    title: 'Installing testing dependencies'
+    image: codefresh/node-tester-image:10.15.3
+    commands:
+        - yarn install --frozen-lockfile --non-interactive
+        - printenv
+    when:
+      steps:
+      - name: main_clone
+        on:
+        - success
+
+  validate_dependencies: &tester
+    title: "Validate dependencies"
+    image: codefresh/node-tester-image:10.13.0
+    stage: test
+    commands:
+    - export count=`find . -type d -name "http-infra" | grep -v kube-integration | wc -l | xargs`
+    - if [ $count -gt 1 ]; then exit 1; else exit 0; fi
+    when:
+      steps:
+      - name: install_dependencies
+        on:
+        - success
+
+
+  jshint:
+    <<: *tester
+    title: 'validate jshint'
+    stage: test
+    commands:
+        - yarn lint
+    when:
+      steps:
+      - name: install_dependencies
+        on:
+        - success
+
+  eslint:
+    <<: *tester
+    title: 'validate eslint'
+    stage: test
+    commands:
+    - yarn eslint
+
+  openapi_lint:
+    <<: *tester
+    title: 'validate openapi'
+    stage: test
+    commands:
+    - yarn openapi-lint
+
+  run_version:
+    <<: *tester
+    title: 'create version file'
+    stage: test
+    commands:
+    - yarn run version
+
+
+  no_onlys:
+    <<: *tester
+    title: 'validate no onlys'
+    stage: test
+    commands:
+    - yarn no.onlys
+
+
+  no_promise_done:
+    <<: *tester
+    title: 'validate no promise done'
+    stage: test
+    commands:
+    - yarn no.promise-done
+
+  unit_test_step:
+    title: "Executing unit tests"
+    stage: test
+    type: composition
+    add_flow_volume_to_composition: true
+    composition: 'CF-API unit-test'
+    composition_candidates:
+      test:
+        image: codefresh/node-tester-image:10.13.0
+        command: yarn ci-test
+        mem_limit: 8000000000 # 8GB
+        environment:
+          COVERALLS_TOKEN: ${{COVERALLS_TOKEN}}
+          GITHUBTESTTOKEN: ${{GITHUBTESTTOKEN}}
+          GITLAB_ACCESS_TOKEN: ${{GITLAB_ACCESS_TOKEN}}
+        working_dir: '${{CF_VOLUME_PATH}}/cf-api'
+        volumes:
+          - '${{CF_VOLUME_NAME}}:/codefresh/volume'
+    when:
+      steps:
+      - name: install_dependencies
+        on:
+        - success
+
+  test_reporting_step:
+    title: "Generate test reporting"
+    fail_fast: false
+    stage: test
+    image: codefresh/cf-docker-test-reporting
+    working_directory: '${{CF_VOLUME_PATH}}/cf-api/'
+    environment:
+      - BUCKET_NAME=codefresh-test-report
+      - CF_STORAGE_INTEGRATION=testReporting
+    when:
+      steps:
+      - name: unit_test_step
+        on:
+        - finished
+
+  build_step:
+    title: "Building production image"
+    type: build
+    stage: build
+    tag: ${{CF_BRANCH_TAG_NORMALIZED}}
+    image_name: codefresh/cf-api
+    on_success:
+      metadata:
+        set:
+          - '${{build_step.imageId}}':
+              - CF_QUALITY: true
+    when:
+      steps:
+      - name: unit_test_step
+        on:
+        - success
