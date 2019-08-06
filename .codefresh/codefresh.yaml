@@ -1,0 +1,10 @@
+version: '1.0'
+
+steps:
+
+  test_resources:
+    image: alpine
+    commands:
+    - ls .
+    - cat ./submit.sh
+    - cat ./clone.sh
