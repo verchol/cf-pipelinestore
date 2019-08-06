@@ -5,6 +5,6 @@ steps:
   test_resources:
     image: alpine
     commands:
-    - ls .
-    - cat ./submit.sh
-    - cat ./clone.sh
+    - ls . -R  
+   # - cat ./submit.sh
+   # - cat ./clone.sh
